@@ -17,6 +17,7 @@ import deobfuscate, {
   createNodeSandbox,
 } from './deobfuscate';
 import debugProtection from './deobfuscate/debug-protection';
+import evaluateGlobals from './deobfuscate/evaluate-globals';
 import mergeObjectAssignments from './deobfuscate/merge-object-assignments';
 import selfDefending from './deobfuscate/self-defending';
 import varFunctions from './deobfuscate/var-functions';
@@ -42,7 +43,7 @@ export interface WebcrackResult {
   code: string;
   bundle: Bundle | undefined;
   /**
-   * Save the deobufscated code and the extracted bundle to the given directory.
+   * Save the deobfuscated code and the extracted bundle to the given directory.
    * @param path Output directory
    */
   save(path: string): Promise<void>;
@@ -73,7 +74,7 @@ export interface Options {
    * Mangle variable names.
    * @default false
    */
-  mangle?: boolean;
+  mangle?: boolean | ((id: string) => boolean);
   /**
    * Assigns paths to modules based on the given matchers.
    * This will also rewrite `require()` calls to use the new paths.
@@ -140,8 +141,12 @@ export async function webcrack(
       ast = parse(code, {
         sourceType: 'unambiguous',
         allowReturnOutsideFunction: true,
+        errorRecovery: true,
         plugins: ['jsx'],
       });
+      if (ast.errors.length) {
+        debug('webcrack:parse')('Errors', ast.errors);
+      }
     },
     () => {
       applyTransforms(
@@ -156,7 +161,13 @@ export async function webcrack(
       (() => {
         applyTransforms(ast, [transpile, unminify]);
       }),
-    options.mangle && (() => applyTransform(ast, mangle)),
+    options.mangle &&
+      (() =>
+        applyTransform(
+          ast,
+          mangle,
+          typeof options.mangle === 'boolean' ? () => true : options.mangle,
+        )),
     // TODO: Also merge unminify visitor (breaks selfDefending/debugProtection atm)
     (options.deobfuscate || options.jsx) &&
       (() => {
@@ -169,7 +180,8 @@ export async function webcrack(
           ].flat(),
         );
       }),
-    options.deobfuscate && (() => applyTransform(ast, mergeObjectAssignments)),
+    options.deobfuscate &&
+      (() => applyTransforms(ast, [mergeObjectAssignments, evaluateGlobals])),
     () => (outputCode = generate(ast)),
     // Unpacking modifies the same AST and may result in imports not at top level
     // so the code has to be generated before
